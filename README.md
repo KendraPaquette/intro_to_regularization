@@ -1,7 +1,7 @@
 Intro to Regularization with Kendra Wyant
 =========================================
 
-[![](~/Desktop/intro_to_regularization.png)](https://www.youtube.com/embed/MmxW1tcOgMc")
+https://www.youtube.com/embed/MmxW1tcOgMc
 
 What is Regularization?
 =======================
