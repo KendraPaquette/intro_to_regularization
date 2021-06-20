@@ -1,0 +1,78 @@
+---
+title: "README"
+author: "Kendra Wyant"
+date: '`r format(Sys.time(), "%Y-%m-%d")`'
+output:
+  md_document:
+    variant: markdown_github
+---
+
+# Intro to Regularization with Kendra Wyant
+
+<iframe width="560" height="315" src="https://www.youtube.com/embed/MmxW1tcOgMc" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+
+
+# What is Regularization?
+Regularization is a type of regression that imposes a penalty to coefficients in complex models. This penalty reduces overfitting by introducing some bias into the model. As we see with the bias-variance tradeoff, introducing some bias can reduce variance in model predictions on new data making the model more generalizable.  
+
+**Types of regularization**     
+* Ridge regression: variables with minor contribution have their coefficients close to zero. However, all the variables are incorporated in the model. This is useful when all variables need to be incorporated in the model according to domain knowledge.
+*	Lasso regression: the coefficients of some less contributive variables are forced to be exactly zero. Only the most significant variables are kept in the final model.
+*	Elasticnet regression: the combination of ridge and lasso regression. It shrinks some coefficients toward zero (like ridge regression) and set some coefficients to exactly zero (like lasso regression)
+
+
+# List of Related Topics/Ideas 
+*We won't be able to cover all of these topics due to time, but I will provide resources and code for anyone who is interested in exploring these further or using them in their own research. I am also happy to chat more outside the workshop!*      
+
+* Prediction vs Explanation in Psychology    
+* Overfitting   
+* Bias/variance tradeoff  
+* Test and training sets    
+* Cross-validation and resampling
+
+
+# Preparation
+## Watch
+StatQuest Youtube Series      
+1.	Machine learning fundamentals – bias and variance (6:35) https://www.youtube.com/watch?v=EuBBz3bI-aA    
+2.	Ridge regression clearly explained (20:26) - https://www.youtube.com/watch?v=Q81RR3yKn30   
+3.  Lasso regression clearly explained (8:18) - https://www.youtube.com/watch?v=NGf0voTMlcs&t   
+4.  Elasticnet regression clearly explaines (5:18) - https://www.youtube.com/watch?v=1dKRdX9bfIo   
+
+Optional: Machine Learning Fundamentals: Cross Validation (6:04) https://www.youtube.com/watch?v=fSytzGwwBVw
+
+## Read
+1.  Skim the first 10 pages of Yarkoni and Westfall (2017) https://www.youtube.com/watch?v=1dKRdX9bfIo   
+2.  Read this blog post on overfitting https://www.ibm.com/cloud/learn/overfitting  
+
+## Software
+
+* We will be using R and RStudio
+* Install the following packages in RStudio:    
+install.packages("tidyverse")  
+install.packages("tidymodels")  
+install.packages("kableExtra")  
+install.packages("skimr")  
+install.packages("naniar")  
+install.packages("doParallel")   
+install.packages("mlbench")   
+install.packages("vip")  
+install.packages("Matrix")  
+install.packages("glmnet")  
+
+
+# Additional Resources
+## Coding  
+* R for Data Science - https://r4ds.had.co.nz/     
+* Tidyverse style guide - https://style.tidyverse.org/    
+* Julia Silge blog - https://juliasilge.com/blog/   
+* Tidy modeling with R - https://www.tmwr.org/    
+
+## Machine learning resources
+* Introduction to statistical learning  - https://static1.squarespace.com/static/5ff2adbe3fe4fe33db902812/t/6009dd9fa7bc363aa822d2c7/1611259312432/ISLR+Seventh+Printing.pdf    
+* Applied predictive modeling - https://vuquangnguyen2016.files.wordpress.com/2018/03/applied-predictive-modeling-max-kuhn-kjell-johnson_1518.pdf    
+
+
+
+**I am looking forward to meeting all of you on Wednesday. Please don't hesitate to reach out about anything (kpaquette2@wisc.edu). I am happy to talk about data science, PREP, Madison, grad school, and more!**  
+

@@ -1,0 +1,591 @@
+---
+title: "Regularization"
+author: "Kendra Wyant"
+date: '`r format(Sys.time(), "%Y-%m-%d")`'
+output: 
+  html_document:
+    toc: true 
+    toc_depth: 4
+---
+
+### Notes
+Purpose: Demo of different regularization techniques using tidymodels in the context 
+of a full workflow.   
+
+
+### Setup
+```{css, include = FALSE}
+pre, code {
+  max-height: 500px;
+  overflow-y: auto;
+  white-space: pre !important; 
+  overflow-x: auto
+}
+```
+
+Paths 
+```{r}
+path_data <- ""
+```
+
+Packages and Source
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(tidymodels)
+library(kableExtra)
+library(skimr)
+library(naniar)
+library(doParallel) # for parallel processing
+library(mlbench) # where our dataset comes
+library(vip)
+library(Matrix)
+library(glmnet)
+
+options(tibble.print_max = Inf)
+```
+
+Setup Parallel Processing
+```{r}
+n_core <- detectCores(logical = FALSE)
+
+cl <- makePSOCKcluster(n_core - 1)
+registerDoParallel(cl)
+```
+
+Define function for plotting hyperparameters (Written by John Curtin)
+```{r}
+plot_hyperparameters <- function(tune_fit, hp1, hp2 = NULL, metric = NULL, log_hp1 = FALSE) {
+
+  data <- collect_metrics(tune_fit)
+  
+  metric_scores <- data %>% 
+    filter(.metric == metric) %>% 
+    pull(mean)
+    
+  x1 <- data[[hp1]]
+  if (log_hp1) x1 <- log(x1)
+  
+  if (is.null(hp2)) {
+    ggplot(mapping = aes(x = x1, y = metric_scores)) +
+      geom_line() +
+      xlab(hp1) +
+      ylab(metric)
+  } else {
+    x2 <- factor(data[[hp2]], ordered = TRUE)
+    ggplot(mapping = aes(x = x1, y = metric_scores, group = x2, color = x2)) +
+      geom_line() +
+      xlab(hp1) +
+      ylab(metric) +
+      scale_color_discrete(name = hp2)
+  }
+}
+```
+
+
+
+### Load Data
+
+```{r}
+data("PimaIndiansDiabetes2", package = "mlbench")
+
+data_all <- PimaIndiansDiabetes2 %>% 
+  mutate(pregnant_history = ifelse(pregnant == 0, "Never been pregnant", "Has been pregnant"),
+         insulin_rating = case_when(insulin < 100 ~ "Average", 
+                                    insulin >= 100 & insulin <= 125 ~ "Moderately high",
+                                    insulin > 125 ~ "Very high"),
+         weight = case_when(mass < 18.5 ~ "Underweight",
+                            mass >= 18.5 & mass < 25 ~ "Average",
+                            mass >= 25 & mass < 30 ~ "Overweight",
+                            mass >= 30 ~ "Obese")) %>% 
+  rename(n_pregnancies = pregnant,
+         bmi = mass)
+```
+
+
+### Cleaning EDA (looks for errors that need to be cleaned)
+
+**Data leakage** = "When information from outside the training dataset is used to create the model. This additional information can allow the model to learn or know something that it otherwise would not know and in turn invalidate the estimated performance of the mode being constructed."     
+
+Glimpse
+```{r}
+data_all %>% 
+  glimpse()
+```
+
+Missing data
+```{r}
+data_all %>% 
+  miss_var_summary()
+```
+
+Numeric Predictors
+```{r}
+data_all %>% 
+  select(where(is.numeric)) %>% 
+  psych::describe() %>% 
+  select(n, min, max)
+```
+
+Categorical Predictors
+```{r}
+data_all %>% 
+  select(where(is.character) | where(is.factor)) %>% 
+  map(~ distinct(as_tibble(.))) 
+```
+
+
+### Test/train split (also may have validation set)
+```{r}
+set.seed(20210606)
+splits <- data_all %>% 
+  initial_split(prop = 3/4, strata = "diabetes")
+
+data_trn <- analysis(splits) %>% 
+  glimpse()
+
+data_test <- assessment(splits) %>% 
+  glimpse()
+```
+
+
+### Modeling EDA (To inform feature engineering)
+
+Distributions
+```{r}
+data_trn %>% 
+  skim()
+```
+
+
+<br>
+
+
+Other EDA:    
+
+* Univariate (e.g., bar plots, histograms)   
+* Bivariate (e.g., relationship between predictors and outcome, correlation matrix)   
+
+
+### Our Model 
+
+Outcome = dichotomous    
+Statistical algorithm = logistic regression   
+Performance metric = accuracy    
+
+Tidymodels workflow:   
+1. Create recipe  
+2. Make features      
+3. Model selection (in training data)   
+4. Model evaluation (in test data)   
+
+
+### Recipe
+
+*Any feature engineering will be done in your recipe using step functions*   
+
+Many different step functions for preprocessing data - https://recipes.tidymodels.org/reference/index.html     
+
+Minimum recipe needed to perform logistic regression
+```{r}
+rec_lr <- recipe(diabetes ~ ., data = data_trn) %>% 
+  step_meanimpute(all_numeric()) %>% 
+  step_string2factor(diabetes, levels = c("neg", "pos")) %>%   # set outcome variable to factor
+  step_string2factor(all_nominal()) %>%
+  step_modeimpute(all_nominal()) %>% 
+  step_dummy(all_nominal(), -diabetes) 
+```
+
+However, for regularization we want to apply a penalty consistently to all predictors.
+So, we need to put all predictors on the same scale using step_normalize
+```{r}
+rec <- recipe(diabetes ~ ., data = data_trn) %>% 
+  step_meanimpute(all_numeric()) %>% 
+  step_string2factor(diabetes, levels = c("neg", "pos")) %>%  # set outcome variable to factor
+  step_string2factor(all_nominal()) %>%
+  step_modeimpute(all_nominal()) %>% 
+  step_dummy(all_nominal(), -diabetes) %>% 
+  step_normalize(all_predictors())
+```
+
+
+
+Other steps that might come in handy:   
+
+* step_dummy = all categorical predictors must be dummy coded
+* step_YeoJohnson = Yeo Johnson transformation (similar to Box Cox transformation)   
+* step_pca = principle components analysis on group of variables   
+* step_nzv = removes variables with near zero variance   
+* step_mutate = similar to mutate in dplyr and gives you flexibility for creating 
+specific features    
+
+<br>
+
+**Question: Why wouldn't we do data processing on the full data set?**      
+
+<br>
+
+### Make features
+
+Training feature matrix   
+Features without scaling
+```{r}
+feat_trn <- rec_lr %>% 
+  prep(training = data_trn, strings_as_factors = FALSE) %>% # calculates any stats from recipe
+  bake(new_data = data_trn) %>% # creates features in training or test data
+  glimpse()
+```
+
+Features with scaling    
+```{r}
+feat_trn <- rec %>% 
+  prep(training = data_trn, strings_as_factors = FALSE) %>% # calculates any stats from recipe
+  bake(new_data = data_trn) %>% # creates features in training or test data
+  glimpse()
+```
+
+<br>
+
+*In the real world this process is iterative*  
+*Here you will want to do some additional EDA here and update your recipe as needed*  
+
+<br>
+
+Check if outcome is balanced   
+```{r}
+feat_trn %>% 
+  ggplot(aes(x = diabetes)) +
+  geom_bar(fill = "light grey", color = "black") +
+  theme_classic()
+```
+
+
+
+Once you have your final recipe you will also want to make a feature matrix from test 
+set. **Do not perfom any EDA on this feature matrix though!** This feature matrix ideally 
+should be used only once for evaluating your model.    
+
+```{r}
+feat_test <- rec %>% 
+  prep(training = data_trn, strings_as_factors = FALSE) %>% 
+  bake(new_data = data_test) # bake on test data
+```
+
+
+
+
+
+### Model Selection 
+
+Set up a tracking tibble to keep track of model performance
+```{r}
+track_accuracy <- tibble(model = character(),
+                         accuracy_trn = numeric(),
+                         n_features = numeric())
+```
+
+
+#### 1. No regularization
+
+Fit model
+```{r}
+fit_lr <-
+  logistic_reg() %>% 
+  set_engine("glm") %>% 
+  fit(diabetes ~ ., data = feat_trn)
+```
+
+estimated model performance
+```{r}
+lr_train <- accuracy_vec(feat_trn$diabetes, predict(fit_lr, feat_trn, type = "class")$.pred_class)
+```
+
+n features
+```{r}
+lr_feat <- fit_lr %>% 
+  tidy() %>% 
+  filter(estimate != 0 & term != "(Intercept)") %>% 
+  nrow()
+
+# note: to see model coefficients use this code
+fit_lr %>% 
+  tidy()
+```
+
+add to tracking tibble
+```{r}
+track_accuracy <- add_row(track_accuracy,
+                          model = "LR w/no regularization",
+                          accuracy_trn = lr_train,
+                          n_features = lr_feat)
+
+track_accuracy
+```
+
+
+#### 2. Lasso regularization
+
+Hyperparameter = An L1 norm penalty (λ)  
+
+With regularization we will need to use resampling to tune our hyperparameter
+```{r}
+splits_boot <- data_trn %>% 
+  bootstraps(times = 100, strata = "diabetes")
+```
+
+Set tune grid
+```{r}
+grid_penalty <- expand_grid(penalty = exp(seq(-7, 3, length.out = 200)))
+```
+
+Fit models
+```{r}
+fits_lasso <- logistic_reg(penalty = tune(), 
+                           mixture = 1) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("classification") %>% 
+  tune_grid(preprocessor = rec,
+            resamples = splits_boot,
+            grid = grid_penalty,
+            metrics = metric_set(accuracy))
+```
+
+Check hyperparameters
+```{r}
+plot_hyperparameters(fits_lasso, hp1 = "penalty", metric = "accuracy", log_hp1 = TRUE)
+```
+
+Best penalty value
+```{r}
+show_best(fits_lasso)
+```
+
+estimated model performance   
+**Question: Why do we first need to train the model again before getting performance and coefficient estimates?**
+```{r}
+fit_lasso <- logistic_reg(penalty = select_best(fits_lasso)$penalty,
+                        mixture = 1) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("classification") %>% 
+  fit(diabetes ~ ., data = feat_trn)
+
+
+lasso_train <- accuracy_vec(feat_trn$diabetes, predict(fit_lasso, feat_trn, type = "class")$.pred_class)
+```
+
+n features
+```{r}
+# Coefficients have now been zeroed out of the model
+fit_lasso %>% 
+  tidy() 
+
+lasso_feat <- fit_lasso %>% 
+  tidy() %>% 
+  filter(estimate != 0 & term != "(Intercept)") %>% 
+  nrow()
+```
+
+add to tracking tibble
+```{r}
+track_accuracy <- add_row(track_accuracy,
+                          model = "Lasso regularization",
+                          accuracy_trn = lasso_train,
+                          n_features = lasso_feat)
+
+track_accuracy
+```
+
+<br>
+
+Lets see how these 2 models compare in new data  
+*Note: this is only for educational purposes, you would not want to do anything with your test set yet*
+```{r}
+lr_test <- accuracy_vec(feat_test$diabetes, predict(fit_lr, feat_test, type = "class")$.pred_class)
+lasso_test <- accuracy_vec(feat_test$diabetes, predict(fit_lasso, feat_test, type = "class")$.pred_class)
+
+track_accuracy %>% 
+  mutate(accuracy_test = c(lr_test, lasso_test)) %>% 
+  select(1:2, 4, 3)
+```
+
+**Question: What might explain these differences in performance in new data?**
+
+
+#### 3. Ridge regularization
+
+Hyperparameter = An L2 norm penalty (λ)   
+
+We can use same bootstrap splits for our ridge and elasticnet models   
+
+
+Set tune grid
+```{r}
+grid_penalty <- expand_grid(penalty = exp(seq(-6, 4, length.out = 200)))
+```
+
+Fit models
+```{r}
+fits_ridge <- logistic_reg(penalty = tune(), 
+                           mixture = 0) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("classification") %>% 
+  tune_grid(preprocessor = rec,
+            resamples = splits_boot,
+            grid = grid_penalty,
+            metrics = metric_set(accuracy))
+```
+
+Check hyperparameters
+```{r}
+plot_hyperparameters(fits_ridge, hp1 = "penalty", metric = "accuracy", log_hp1 = TRUE)
+```
+
+Best penalty value
+```{r}
+show_best(fits_ridge)
+```
+
+estimated model performance
+```{r}
+fit_ridge <- logistic_reg(penalty = select_best(fits_ridge)$penalty,
+                        mixture = 0) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("classification") %>% 
+  fit(diabetes ~ ., data = feat_trn)
+
+
+ridge_train <- accuracy_vec(feat_trn$diabetes, predict(fit_ridge, feat_trn, type = "class")$.pred_class)
+```
+
+n features
+```{r}
+ridge_feat <- fit_ridge %>% 
+  tidy() %>% 
+  filter(estimate != 0 & term != "(Intercept)") %>% 
+  nrow()
+```
+
+add to tracking tibble
+```{r}
+track_accuracy <- add_row(track_accuracy,
+                          model = "Ridge regularization",
+                          accuracy_trn = ridge_train,
+                          n_features = ridge_feat)
+
+track_accuracy
+```
+
+<br>
+
+#### 4. Elasticnet regularization 
+
+This model has two hyper-parameters:  
+
+λ controls the degree of regularization as before
+α is a “mixing” parameter that blends the degree of L1 and L2 contributions to the 
+aggregate penalty. (Proportion of LASSO penalty)  
+α = 1 results in the LASSO model   
+α = 0 results in the Ridge model   
+Intermediate values for α blend these penalties together proportionally to include 
+more or less LASSO penalty   
+
+
+Set tune grid
+```{r}
+grid_penalty <- expand_grid(penalty = exp(seq(-6, 3, length.out = 200)),
+                            mixture = seq(0, 1, length.out = 11))
+```
+
+Fit models
+```{r}
+fits_en <- logistic_reg(penalty = tune(), 
+                        mixture = tune()) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("classification") %>% 
+  tune_grid(preprocessor = rec,
+            resamples = splits_boot,
+            grid = grid_penalty,
+            metrics = metric_set(accuracy))
+```
+
+Check hyperparameters
+```{r}
+plot_hyperparameters(fits_en, hp1 = "penalty", hp2 = "mixture", metric = "accuracy", log_hp1 = TRUE)
+```
+
+Best penalty value
+```{r}
+show_best(fits_en)
+```
+
+estimated model performance
+```{r}
+fit_en <- logistic_reg(penalty = select_best(fits_en)$penalty,
+                       mixture = 0) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("classification") %>% 
+  fit(diabetes ~ ., data = feat_trn)
+
+
+en_train <- accuracy_vec(feat_trn$diabetes, predict(fit_en, feat_trn, type = "class")$.pred_class)
+```
+
+n features
+```{r}
+en_feat <- fit_en %>% 
+  tidy() %>% 
+  filter(estimate != 0 & term != "(Intercept)") %>% 
+  nrow()
+```
+
+add to tracking tibble
+```{r}
+track_accuracy <- add_row(track_accuracy,
+                          model = "Elasticnet regularization",
+                          accuracy_trn = en_train,
+                          n_features = en_feat)
+
+track_accuracy
+```
+
+<br>
+
+**Question: Which model should we select?**
+
+<br>
+
+### Model evaluation
+
+Note we are not selecting and evaluating our model on the same data to avoid optimization 
+bias. Optimization bias results in slightly overestimating how well a model will perform 
+on new data. This may be okay depending on your research question. 
+
+```{r}
+# refit best model on entire data set
+fit_best <- fit_en
+
+accuracy_vec(feat_test$diabetes, predict(fit_best, feat_test)$.pred_class)
+```
+
+Get final model coefficients on full data set
+```{r}
+fit_best %>% 
+  tidy()
+```
+
+Feature important indices
+```{r}
+fit_best$fit %>% 
+  vip::vi() %>% 
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) %>%
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+```
+
+
+
+
