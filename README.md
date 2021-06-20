@@ -16,13 +16,13 @@ on new data making the model more generalizable.
 \* Ridge regression: variables with minor contribution have their
 coefficients close to zero. However, all the variables are incorporated
 in the model. This is useful when all variables need to be incorporated
-in the model according to domain knowledge. \* Lasso regression: the
-coefficients of some less contributive variables are forced to be
-exactly zero. Only the most significant variables are kept in the final
-model. \* Elasticnet regression: the combination of ridge and lasso
-regression. It shrinks some coefficients toward zero (like ridge
-regression) and set some coefficients to exactly zero (like lasso
-regression)
+in the model according to domain knowledge.   
+\* Lasso regression: the coefficients of some less contributive variables 
+are forced to be exactly zero. Only the most significant variables are kept 
+in the final model.  
+\* Elasticnet regression: the combination of ridge and lasso regression. 
+It shrinks some coefficients toward zero (like ridge regression) and set 
+some coefficients to exactly zero (like lasso regression).
 
 List of Related Topics/Ideas
 ============================
