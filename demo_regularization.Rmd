@@ -211,7 +211,7 @@ rec <- recipe(diabetes ~ ., data = data_trn) %>%
 
 Other steps that might come in handy:   
 
-* step_dummy = all categorical predictors must be dummy coded
+* step_interact = add interactions to model
 * step_YeoJohnson = Yeo Johnson transformation (similar to Box Cox transformation)   
 * step_pca = principle components analysis on group of variables   
 * step_nzv = removes variables with near zero variance   
@@ -549,7 +549,9 @@ track_accuracy
 
 <br>
 
-**Question: Which model should we select?**
+**Question: Which model should we select?**   
+
+**Why do you think this model performed best?**
 
 <br>
 
@@ -560,21 +562,36 @@ bias. Optimization bias results in slightly overestimating how well a model will
 on new data. This may be okay depending on your research question. 
 
 ```{r}
-# refit best model on entire data set
-fit_best <- fit_en
+fit_best <- logistic_reg(penalty = select_best(fits_en)$penalty,
+                       mixture = 0) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("classification") %>% 
+  fit(diabetes ~ ., data = feat_trn)
 
 accuracy_vec(feat_test$diabetes, predict(fit_best, feat_test)$.pred_class)
 ```
 
 Get final model coefficients on full data set
 ```{r}
-fit_best %>% 
+# feature matrix
+feat_all <- rec %>% 
+  prep(training = data_all, strings_as_factors = FALSE) %>% 
+  bake(new_data = data_all) 
+
+# refit best model on entire data set
+fit_best_full <- logistic_reg(penalty = select_best(fits_en)$penalty,
+                       mixture = 0) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("classification") %>% 
+  fit(diabetes ~ ., data = feat_all)
+
+fit_best_full %>% 
   tidy()
 ```
 
 Feature important indices
 ```{r}
-fit_best$fit %>% 
+fit_best_full$fit %>% 
   vip::vi() %>% 
   mutate(
     Importance = abs(Importance),
