@@ -1,5 +1,5 @@
 ---
-title: "Regularization"
+title: "Regularization Part 1"
 author: "Kendra Wyant"
 date: '`r format(Sys.time(), "%Y-%m-%d")`'
 output: 
