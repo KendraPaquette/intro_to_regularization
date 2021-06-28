@@ -1,0 +1,590 @@
+---
+title: "Regularization part 2"
+author: "Kendra Wyant"
+date: '`r format(Sys.time(), "%Y-%m-%d")`'
+output: 
+  html_document:
+    toc: true 
+    toc_depth: 4
+---
+
+### Notes
+Purpose: Demo of different regularization techniques using tidymodels in the context 
+of a full workflow on the Ames data set.   
+
+
+### Setup
+```{css, echo = FALSE}
+pre, code {
+  max-height: 500px;
+  overflow-y: auto;
+  white-space: pre !important; 
+  overflow-x: auto
+}
+```
+
+Paths 
+```{r}
+path_data <- ""
+```
+
+Packages and Source
+```{r, message = FALSE, warning = FALSE}
+# install.packages("cowplot")
+
+library(cowplot)
+library(tidyverse)
+library(tidymodels)
+library(kableExtra)
+library(skimr)
+library(naniar)
+library(doParallel) # for parallel processing
+library(mlbench) # where our dataset comes
+library(vip)
+library(Matrix)
+library(glmnet)
+
+options(tibble.print_max = Inf)
+```
+
+Setup Parallel Processing
+```{r}
+n_core <- detectCores(logical = FALSE)
+
+cl <- makePSOCKcluster(n_core - 1)
+registerDoParallel(cl)
+```
+
+Define function for plotting hyperparameters (Written by John Curtin)
+```{r}
+plot_hyperparameters <- function(tune_fit, hp1, hp2 = NULL, metric = NULL, log_hp1 = FALSE) {
+
+  data <- collect_metrics(tune_fit)
+  
+  metric_scores <- data %>% 
+    filter(.metric == metric) %>% 
+    pull(mean)
+    
+  x1 <- data[[hp1]]
+  if (log_hp1) x1 <- log(x1)
+  
+  if (is.null(hp2)) {
+    ggplot(mapping = aes(x = x1, y = metric_scores)) +
+      geom_line() +
+      xlab(hp1) +
+      ylab(metric)
+  } else {
+    x2 <- factor(data[[hp2]], ordered = TRUE)
+    ggplot(mapping = aes(x = x1, y = metric_scores, group = x2, color = x2)) +
+      geom_line() +
+      xlab(hp1) +
+      ylab(metric) +
+      scale_color_discrete(name = hp2)
+  }
+}
+```
+
+
+
+### Load Data
+
+```{r}
+# install.packages("AmesHousing")
+library(AmesHousing)
+
+data_all <- ames_raw %>% 
+  janitor::clean_names() %>% # install.packages("janitor")
+  glimpse()
+
+?ames_raw
+
+
+data_all <- data_all %>% 
+  select(-c(pid, order))
+```
+
+
+### Cleaning EDA (looks for errors that need to be cleaned)
+
+Missing data
+```{r}
+data_all %>% 
+  miss_var_summary()
+```
+
+Numeric Predictors
+```{r}
+data_all %>% 
+  select(where(is.numeric)) %>% 
+  psych::describe() %>% 
+  select(n, min, max)
+```
+
+Categorical Predictors
+```{r}
+data_all %>% 
+  select(where(is.character)) %>% 
+  map(~ distinct(as_tibble(.))) 
+```
+
+
+### Test/train split (also may have validation set)
+```{r}
+set.seed(20210606)
+splits <- data_all %>% 
+  initial_split(prop = 3/4, strata = "sale_price")
+
+data_trn <- analysis(splits) %>% 
+  glimpse()
+
+data_test <- assessment(splits) %>% 
+  glimpse()
+```
+
+
+### Modeling EDA (To inform feature engineering)
+
+Distributions
+```{r}
+data_trn %>% 
+  skim()
+```
+
+
+<br>
+
+
+Categorical variables
+```{r fig.height = 8, fig.width = 12}
+plots_1 <- data_trn %>% 
+  select(where(is.character), -c(neighborhood, ms_sub_class)) %>% 
+  names() %>% 
+  map(., function(x){ 
+    data_trn %>% 
+    ggplot(aes(x = .data[[x]])) + 
+    geom_bar(fill = "light grey", color = "black") +
+    theme(axis.text.x = element_text(size = 8),
+          axis.text.y = element_text(size = 8))
+})
+
+plots_2 <- data_trn %>% 
+  select(c(neighborhood, ms_sub_class)) %>% 
+  names() %>% 
+  map(., function(x){
+    data_trn %>% 
+    ggplot(aes(x = .data[[x]])) + 
+    geom_bar(fill = "light grey", color = "black") +
+    coord_flip() +
+    theme(axis.text.y = element_text(size = 6),
+          axis.text.x = element_text(size = 8))
+})
+
+plot_grid(plotlist = c(plots_1, plots_2), ncol= 8)
+```
+
+Numeric variables
+```{r fig.height = 8, fig.width = 12}
+plots_num <- data_trn %>% 
+  select(where(is.numeric)) %>% 
+  names() %>% 
+  map(., function(x){ 
+    data_trn %>% 
+    ggplot(aes(x = .data[[x]])) + 
+    geom_histogram(bins = 15, fill = "light grey", color = "black") +
+    theme(axis.text.x = element_text(size = 8),
+          axis.text.y = element_text(size = 8))
+})
+
+plot_grid(plotlist = c(plots_num), ncol= 4)
+```
+
+
+Correlations
+```{r fig.width = 12}
+data_trn %>% 
+  select(where(is.numeric)) %>% 
+  cor(use = "pairwise.complete.obs") %>%  # to accommodate missing data 
+  round(2)
+
+data_trn %>% 
+  select(where(is.numeric)) %>% 
+  cor(use = "pairwise.complete.obs") %>%  
+  corrplot::corrplot.mixed(tl.cex = 0.5)
+```
+
+
+
+### Our Model 
+
+Outcome = continuous     
+Statistical algorithm = linear regression   
+Performance metric = RMSE    
+
+Tidymodels workflow:   
+1. Create recipe  
+2. Make features      
+3. Model selection (in training data)   
+4. Model evaluation (in test data)   
+
+
+### Recipe
+
+Many different step functions for preprocessing data - https://recipes.tidymodels.org/reference/index.html     
+
+Simple linear regression recipe 
+```{r}
+rec <- recipe(sale_price ~ ., data = data_trn) %>% 
+  # handle missing data
+  step_rm(pool_qc, misc_feature, alley) %>%  # remove varibles with > 90% missing data
+  # Note NA has a meaning for some variables
+  step_mutate_at(c(fence, fireplace_qu, garage_finish, garage_qual, garage_cond, garage_type,
+                     bsmt_exposure, bsmt_fin_type_2, bsmt_qual, bsmt_cond, bsmt_fin_type_1),
+              fn = ~ ifelse(is.na(.), "None", .)) %>% 
+  step_medianimpute(all_numeric()) %>%
+  step_modeimpute(all_nominal()) %>% 
+  # Dummy code categorical variables
+  step_string2factor(all_nominal()) %>%
+  step_dummy(all_nominal()) %>% 
+  step_normalize(all_predictors())
+```
+
+
+<br>
+
+### Make features
+
+Make feature matrices 
+```{r}
+feat_trn <- rec %>% 
+  prep(training = data_trn, strings_as_factors = FALSE) %>% 
+  bake(new_data = data_trn) %>%
+  glimpse()
+
+feat_test <- rec %>% 
+  prep(training = data_trn, strings_as_factors = FALSE) %>% 
+  bake(new_data = data_test) 
+```
+
+new levels in a factor warning
+```{r}
+miss_var_summary(feat_test) %>% 
+  filter(n_miss > 0)
+
+# in our training data set we only have 2 out of 4 possible levels of the utilities var
+data_trn %>% 
+  ggplot(aes(x = utilities)) +
+  geom_bar(fill = "light grey", color = "black") +
+  theme_classic()
+```
+
+Update recipe to accommodate new variable levels
+```{r}
+rec <- recipe(sale_price ~ ., data = data_trn) %>% 
+  # handle missing data
+  step_rm(pool_qc, misc_feature, alley) %>%  # remove varibles with > 90% missing data
+  # Note NA has a meaning for some variables
+  step_mutate_at(c(fence, fireplace_qu, garage_finish, garage_qual, garage_cond, garage_type,
+                     bsmt_exposure, bsmt_fin_type_2, bsmt_qual, bsmt_cond, bsmt_fin_type_1),
+              fn = ~ ifelse(is.na(.), "None", .)) %>% 
+  step_medianimpute(all_numeric()) %>%
+  step_modeimpute(all_nominal()) %>% 
+  # handle new factor levels
+  step_novel(condition_2, utilities) %>% 
+  step_other(all_nominal()) %>% 
+  # Dummy code categorical variables
+  step_string2factor(all_nominal()) %>%
+  step_dummy(all_nominal()) %>% 
+  step_normalize(all_predictors())
+```
+
+feature matrices
+```{r}
+feat_trn <- rec %>% 
+  prep(training = data_trn, strings_as_factors = FALSE) %>% 
+  bake(new_data = data_trn)
+
+feat_test <- rec %>% 
+  prep(training = data_trn, strings_as_factors = FALSE) %>% 
+  bake(new_data = data_test) 
+```
+
+
+
+### Model Selection 
+
+Set up a tracking tibble to keep track of model performance
+```{r}
+track_rmse <- tibble(model = character(),
+                     rmse_trn = numeric(),
+                     n_features = numeric())
+```
+
+
+#### 1. No regularization
+
+Fit model
+```{r}
+fit_linear <-
+  linear_reg() %>% 
+  set_engine("lm") %>% 
+  fit(sale_price ~ ., data = feat_trn)
+```
+
+add to tracking tibble
+```{r}
+# get num features
+linear_feat <- fit_linear %>% 
+  tidy() %>% 
+  filter(estimate != 0 & term != "(Intercept)") %>% 
+  nrow()
+
+(track_rmse<- add_row(track_rmse,
+                      model = "Linear regression w/no regularization",
+                      rmse_trn = rmse_vec(truth = feat_trn$sale_price,
+                                          estimate = predict(fit_linear, feat_trn)$.pred),
+                      n_features = linear_feat))
+```
+
+Note the warning message - we have too many correlated predictors for a regular linear model!   
+A model can't be fit with perfect multicollinearity (cannot estimate parameters when we have redundant columns) so it drops a variable or variables and gives us this warning.  
+
+```{r}
+fit_linear %>% 
+  tidy()
+```
+
+This problem could be handled in the recipe with step_corr and step_nzv but lets move on to the next steps for now.  
+
+
+#### 2. Lasso regularization
+
+Create splits  
+We will use cross-validation instead of bootstrapping this time
+```{r}
+splits_kfold <- data_trn %>% 
+  # Note in your own data you likely will want to use repeated kfold
+  vfold_cv(v = 10, repeats = 1, strata = "sale_price")
+```
+
+Set tune grid
+```{r}
+grid_penalty <- expand_grid(penalty = exp(seq(-4, 7, length.out = 500)))
+```
+
+Fit models
+```{r}
+fits_lasso <- linear_reg(penalty = tune(), 
+                           mixture = 1) %>% 
+  set_engine("glmnet") %>% 
+  tune_grid(preprocessor = rec,
+            resamples = splits_kfold,
+            grid = grid_penalty,
+            metrics = metric_set(rmse))
+```
+
+Check hyperparameters
+```{r}
+plot_hyperparameters(fits_lasso, hp1 = "penalty", metric = "rmse")
+```
+
+Best penalty value
+```{r}
+show_best(fits_lasso)
+```
+
+Fit best model to full training data
+```{r}
+fit_lasso <- linear_reg(penalty = select_best(fits_lasso)$penalty,
+                        mixture = 1) %>% 
+  set_engine("glmnet") %>% 
+  fit(sale_price ~ ., data = feat_trn)
+```
+
+add to tracking tibble
+```{r}
+# get num features
+lasso_feat <- fit_lasso %>% 
+  tidy() %>% 
+  filter(estimate != 0 & term != "(Intercept)") %>% 
+  nrow()
+
+(track_rmse<- add_row(track_rmse,
+                      model = "Lasso regression",
+                      rmse_trn = rmse_vec(truth = feat_trn$sale_price,
+                                          estimate = predict(fit_lasso, feat_trn)$.pred),
+                      n_features = lasso_feat))
+```
+
+<br>
+
+Lets see how these 2 models compare in new data  
+*Note again: this is only for educational purposes, you would not want to do anything with your test set yet*
+```{r}
+linear_test <- rmse_vec(truth = feat_test$sale_price, 
+                        estimate = predict(fit_linear, feat_test)$.pred)
+lasso_test <- rmse_vec(truth = feat_test$sale_price, 
+                       estimate = predict(fit_lasso, feat_test)$.pred)
+
+track_rmse %>% 
+  mutate(rmse_test = c(linear_test, lasso_test)) %>% 
+  select(1:2, 4, 3)
+```
+
+
+
+
+#### 3. Ridge regularization
+
+Set tune grid
+```{r}
+grid_penalty <- expand_grid(penalty = exp(seq(-12, 13, length.out = 500)))
+```
+
+Fit models
+```{r}
+fits_ridge <- linear_reg(penalty = tune(), 
+                         mixture = 0) %>% 
+  set_engine("glmnet") %>% 
+  tune_grid(preprocessor = rec,
+            resamples = splits_kfold,
+            grid = grid_penalty,
+            metrics = metric_set(rmse))
+```
+
+Check hyperparameters
+```{r}
+plot_hyperparameters(fits_ridge, hp1 = "penalty", metric = "rmse")
+```
+
+Best penalty value
+```{r}
+show_best(fits_ridge)
+```
+
+Fit best model to full training data
+```{r}
+fit_ridge <- linear_reg(penalty = select_best(fits_ridge)$penalty,
+                        mixture = 0) %>% 
+  set_engine("glmnet") %>% 
+  fit(sale_price ~ ., data = feat_trn)
+```
+
+add to tracking tibble
+```{r}
+# get num features
+ridge_feat <- fit_ridge %>% 
+  tidy() %>% 
+  filter(estimate != 0 & term != "(Intercept)") %>% 
+  nrow()
+
+(track_rmse<- add_row(track_rmse,
+                      model = "Ridge regression",
+                      rmse_trn = rmse_vec(truth = feat_trn$sale_price,
+                                          estimate = predict(fit_ridge, feat_trn)$.pred),
+                      n_features = ridge_feat))
+```
+
+<br>
+
+#### 4. Elasticnet regularization 
+
+Set tune grid
+```{r}
+grid_penalty <- expand_grid(penalty = exp(seq(-12, 10, length.out = 500)),
+                            mixture = seq(0, 1, length.out = 11))
+```
+
+Fit models
+```{r}
+fits_en <- linear_reg(penalty = tune(), 
+                      mixture = tune()) %>% 
+  set_engine("glmnet") %>% 
+  tune_grid(preprocessor = rec,
+            resamples = splits_kfold,
+            grid = grid_penalty,
+            metrics = metric_set(rmse))
+```
+
+Check hyperparameters
+```{r}
+plot_hyperparameters(fits_en, hp1 = "penalty", hp2 = "mixture", metric = "rmse")
+```
+
+Best penalty value
+```{r}
+show_best(fits_en)
+```
+
+fit best model to full training data
+```{r}
+fit_en <- linear_reg(penalty = select_best(fits_en)$penalty,
+                     mixture = select_best(fits_en)$mixture) %>% 
+  set_engine("glmnet") %>% 
+  fit(sale_price ~ ., data = feat_trn)
+```
+
+add to tracking tibble
+```{r}
+# get num features
+en_feat <- fit_en %>% 
+  tidy() %>% 
+  filter(estimate != 0 & term != "(Intercept)") %>% 
+  nrow()
+
+(track_rmse<- add_row(track_rmse,
+                      model = "Elasticnet regression",
+                      rmse_trn = rmse_vec(truth = feat_trn$sale_price,
+                                          estimate = predict(fit_en, feat_trn)$.pred),
+                      n_features = en_feat))
+```
+
+
+
+<br>
+
+### Model evaluation
+
+```{r}
+fit_best <- linear_reg(penalty = select_best(fits_lasso)$penalty,
+                        mixture = 1) %>% 
+  set_engine("glmnet") %>% 
+  fit(sale_price ~ ., data = feat_trn)
+
+rmse_vec(truth = feat_test$sale_price, estimate = predict(fit_best, feat_test)$.pred)
+```
+
+Get final model coefficients on full data set
+```{r}
+# feature matrix
+feat_all <- rec %>% 
+  prep(training = data_all, strings_as_factors = FALSE) %>% 
+  bake(new_data = data_all) 
+
+# refit best model on entire data set
+fit_best_full <- linear_reg(penalty = select_best(fits_lasso)$penalty,
+                        mixture = 1) %>% 
+  set_engine("glmnet") %>% 
+  fit(sale_price ~ ., data = feat_all)
+
+fit_best_full %>% 
+  tidy()
+```
+
+Feature important indices
+```{r}
+fit_best_full$fit %>% 
+  vip::vi() %>% 
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) %>%
+  head(20) %>% 
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+```
+
+
+
+

@@ -14,7 +14,7 @@ of a full workflow.
 
 
 ### Setup
-```{css, include = FALSE}
+```{css, echo = FALSE}
 pre, code {
   max-height: 500px;
   overflow-y: auto;
