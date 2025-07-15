@@ -1,0 +1,291 @@
+---
+title: "Intro to Resampling and Cross-Validation"
+author: "Kendra Wyant"
+date: "`r lubridate::today()`"
+format: 
+  html: 
+    embed-resources: true
+    toc: true 
+    toc_depth: 4
+editor_options: 
+  chunk_output_type: console
+---   
+
+
+## Introduction
+In this demo, we will walk through code to see how to use cross-validation for model selection and evaluation. We will cover issues related to over-fitting, bias-variance of model performance estimats, and different types of k-fold resampling. We will not cover bootstrapping in the code demo, but bootstrapping is another common method for resampling and I am happy to talk more about it if people have questions!
+
+----
+
+**Here are some FREE resources I recommend:**
+
+- The blog post below provides a brief introduction to over-fitting
+  [https://www.ibm.com/cloud/learn/overfitting](https://www.ibm.com/cloud/learn/overfitting)
+- The link below is the course website for John Curtin's Introduction to Applied Machine Learning Course - tons of helpful stuff in here and with code examples!
+  [https://jjcurtin.github.io/book_iaml/](https://jjcurtin.github.io/book_iaml/)
+
+- Some helpful coding resources 
+      
+    1.  R for Data Science - [https://r4ds.had.co.nz](https://r4ds.had.co.nz)
+    2. Tidyverse style guide - [https://style.tidyverse.org](https://style.tidyverse.org)
+    3. Julia Silge blog - [https://juliasilge.com/blog](https://juliasilge.com/blog)
+    4. Tidy modeling with R - [https://www.tmwr.org](https://www.tmwr.org)
+   
+- Additional Machine learning resources
+  
+    1. Introduction to statistical learning - [ebook](https://static1.squarespace.com/static/5ff2adbe3fe4fe33db902812/t/6009dd9fa7bc363aa822d2c7/1611259312432/ISLR+Seventh+Printing.pdf)
+    2. Applied predictive modeling - [ebook](https://vuquangnguyen2016.files.wordpress.com/2018/03/applied-predictive-modeling-max-kuhn-kjell-johnson_1518.pdf)
+
+
+Lastly, my email is `kpaquette2@wisc.edu` - feel free to email about anything related to PREP, machine learning, grad school, and beyond. I am a former PREP student as well and happy to be a resource!! 
+
+## Set up
+
+### Load required packages 
+```{r}
+#| message: false
+
+library(tidyverse) 
+library(tidymodels)
+library(mlbench) # for data set
+library(kknn) # for knn modeling
+
+theme_set(theme_classic())
+```
+
+
+### Parallel processing
+
+When using resampling, we often end up fitting many, many model configurations. 
+
+When two criteria are met we can fit the models in parallel (and with big time savings):   
+
+1. The fitting process for each of these configurations is independent for the others.
+2. The order that the configurations are fit doesn’t matter either.
+
+Lets set up parallel processing based on the number of cores our computers have.
+```{r}
+cl <- parallel::makePSOCKcluster(parallel::detectCores(logical = FALSE))
+doParallel::registerDoParallel(cl)
+```
+
+Note you can type `cl` into your console to see how many cores your computer has. 
+```{r}
+cl
+```
+
+
+### Read in data
+
+Lets load an existing R data set to work with
+```{r}
+data("PimaIndiansDiabetes") 
+data <- PimaIndiansDiabetes
+```
+
+We can learn more about the data but glimpsing it and looking at the codebook.
+```{r}
+glimpse(data)
+
+?PimaIndiansDiabetes
+```
+
+Our outcome variable is going to be `diabetes`. We can see that it is a factor and the positive label (what we are trying to predict) is the second level. This is what we want for a classification model!
+```{r}
+class(data$diabetes)
+levels(data$diabetes) 
+```
+
+
+## Single data set for training model and evaluating model
+
+*What are some problems with this approach (that is also used often in psychology research!)?*
+
+- Overfitting to noise - the model has already seen the data so it is trying to find best fit for that specific set of data.
+- Optimistic performance estimates
+- Not generalizable to new data - in fact you really don't know how well your model will do because you don't know how overfit it is. Perhaps its just a little overfit or maybe its incredibly overfit!
+
+**Data leakage** = "When information from outside the training dataset is used to create the model. This additional information can allow the model to learn or know something that it otherwise would not know and in turn invalidate the estimated performance of the mode being constructed."    
+
+Lets fit a logistic regression model to predict `diabetes` using all of our predictors. We are not going to use resampling yet.
+```{r}
+log_reg <- logistic_reg() |> 
+  set_engine("glm") |> 
+  set_mode("classification") |> 
+  fit(diabetes ~ ., data = data)
+
+preds <- predict(log_reg, data) |>
+  bind_cols(data |> select(diabetes))
+
+preds |> 
+  metrics(truth = diabetes, estimate = .pred_class)
+```
+
+So our accuracy estimate is 78%...but this doesn't really mean anything if we ever wanted to use our model on new data. 
+
+## Single train/test split
+One simple resampling approach is using a single split to hold out some data to evaluate model on. Can also do a 3rd split validation if needing to select among configurations.
+
+things to keep in mind with this approach:
+- Holding out data for a test set (and possibly validation set) means using less data for training your model. Why is this a problem? 
+- Evaluating model on single test set. Why could this be a problem?
+
+
+## Evaluating single model with k-fold CV
+
+Lets now fit the same model but using cross-validation.
+
+*Has anyone heard about CV before?*
+
+
+### Split data
+
+Splitting data in 10 folds, stratified on `diabetes`
+
+*Why might it be important to stratify on the outcome variable?*
+
+```{r}
+data |> 
+  count(diabetes) # 35% pos
+```
+
+
+```{r}
+set.seed(102030)
+
+splits_kfold <- data |> 
+  vfold_cv(v = 10, repeats = 1, strata = "diabetes")
+
+splits_kfold
+```
+
+### Build a recipe
+
+Build a recipe that states `diabetes` is the outcome variable regressed on all predictors.  
+
+Tidymodels has tons of other `step_()` functions that can be added to the recipe - https://recipes.tidymodels.org/reference/index.html. For example, if we had any factor predictors, we could use `step_dummy()` to dummy code those variables within the recipe. We could also handle missing data with `step_impute_()` functions.
+
+*By doing these steps within the recipe your ensuring that you are only manipulating the training data which prevents data leakage.* e.g., when imputing missing values with the mean you want this to be the mean of the training set and not of the full dataset including the testing set!
+
+```{r}
+rec <- recipe(diabetes ~ ., data = data) 
+```
+
+
+### fit model
+
+Lets fit a model on each of our splits using k-fold cross-validation. We are going to start with basic logistic regression as our statistical algorithm and `accuracy` as our metric. 
+
+```{r}
+fits_log_reg <- logistic_reg() |> 
+  set_engine("glm") |> 
+  set_mode("classification") |> 
+  fit_resamples(preprocessor = rec,
+                resamples = splits_kfold,
+                metrics = metric_set(accuracy))
+```
+
+We can examine the performance estimates (i.e., accuracy in each held out set of data) using the `collect_metrics()` function. Lets look at a table of the held-out performance estimates from the 10 folds
+```{r}
+metrics_log_reg <- collect_metrics(fits_log_reg, summarize = FALSE)
+
+metrics_log_reg 
+```
+
+Plot a histogram of the performance estimates
+
+*What do you notice?* 
+```{r}
+hist(metrics_log_reg$.estimate)
+```
+
+Print the average performance over folds with the `summarize = TRUE` argument.
+```{r}
+collect_metrics(fits_log_reg, summarize = TRUE)
+```
+
+
+
+## Using k-fold to select a best machine learning model configuration
+
+### Split data
+
+Lets work with a few more splits now!
+```{r}
+set.seed(102030)
+
+splits_kfold_repeat <- data |> 
+  vfold_cv(v = 10, repeats = 3, strata = "diabetes")
+
+splits_kfold_repeat |> 
+  print(n = Inf)
+```
+
+### Set up hyperparameter grid
+
+Hyperparameters are parameters we have to specify to guide the machine learning algorithm. We are going to use a K-Nearest Neighbors (KNN) ML algorithm. This has a hyperparameter `k` which stands for the number of neighbors it will use.
+
+We often don't know what the best hyperparameter value will be beforehand so we consider a range of values using a tuning grid. We then can select the best hyperparameter value (i.e., best model configuration) based on our performance metric (in this exercise that would be accuracy).
+
+Create a tibble with all values of the hyperparameter (`k`) we will consider. 
+```{r}
+hyper_grid <- expand.grid(neighbors = seq(2, 250, by = 5))
+```
+
+We are going to update our recipe so that all our numeric predictors are standardized
+```{r}
+?step_range
+
+rec <- rec |> 
+  step_range(all_numeric_predictors())
+```
+
+Tune the model with cross-validation. 
+```{r}
+fits_knn <- nearest_neighbor(neighbors = tune()) |> 
+  set_engine("kknn") |> 
+  set_mode("classification") |> 
+  tune_grid(preprocessor = rec,
+              resamples = splits_kfold_repeat,
+              grid = hyper_grid,
+              metrics = metric_set(accuracy))
+```
+
+Examine performance estimates across the held-out sets. When we use `summarize = TRUE` we get the average performance estimate across our 30 splits for each model configuration.
+```{r }
+collect_metrics(fits_knn, summarize = TRUE) |> 
+  print(n = Inf)
+```
+
+Plot the average performance by hyperparameter value. 
+```{r}
+collect_metrics(fits_knn, summarize = TRUE) |> 
+  ggplot() +
+  geom_line(aes(x = neighbors, y = mean))
+```
+
+
+Print the performance of your best model configuration with the `show_best()` function.
+```{r}
+show_best(fits_knn, metric = "accuracy", n = 1)
+```
+
+lets look at histogram of 30 estimates for our best hyperparameter value
+```{r}
+best_knn <- collect_metrics(fits_knn, summarize = FALSE) |> 
+  filter(neighbors == show_best(fits_knn, metric = "accuracy", n = 1)$neighbors)
+
+hist(best_knn$.estimate)
+```
+
+
+**Important** - in this scenario we used cv to select the best model configuration. We also were able to calculate a performance estimate BUT using the same held out data for selection and evaluation leads to another potential issue - *Optimization Bias*.   
+
+Optimization bias results in slightly overestimating how well a model will perform on new data. This may be okay depending on your research question. But if it is important that you have a true evaluation of how well your model can predict in new data (e.g., you are going to deploy a model that predicts when someone relapses back to opioids) you want to have an unbiased estimate of your model's accuracy beforehand.
+
+We could have gotten around this issue by holding out a true test set and then using our repeated k-fold cv on the remaining data. 
+
+An even better approach though is Nested cross-validation. Considered the Gold standard - it selects the best model configuration on validation set (inner resampling) and then evaluates on new held-out data (outer k-fold).
+
+
+
